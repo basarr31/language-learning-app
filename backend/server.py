@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import csv
 import io
 import math
+from .utils import calculate_streak
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -86,7 +87,7 @@ class DailyProgress(BaseModel):
     cards_studied: int = 0
     new_cards: int = 0
     review_cards: int = 0
-    correct_rate: float = 0.0
+    correct_rate: float = 0.0  # proportion of correct answers (0-1)
     study_time: int = 0  # minutes
     streak_count: int = 0
 
@@ -266,15 +267,27 @@ async def create_study_session(session: StudySessionCreate):
     # Update daily progress
     today = datetime.utcnow().date().isoformat()
     existing_progress = await db.daily_progress.find_one({"date": today})
-    
+
     if existing_progress:
-        # Update existing progress
+        # Update existing progress and recompute correct answer rate
+        previous_cards = existing_progress.get("cards_studied", 0)
+        previous_correct = existing_progress.get("correct_rate", 0) * previous_cards
+
+        new_total_cards = previous_cards + session.cards_studied
+        new_correct_answers = previous_correct + session.correct_answers
+        new_correct_rate = (
+            new_correct_answers / new_total_cards if new_total_cards > 0 else 0
+        )
+
         await db.daily_progress.update_one(
             {"date": today},
-            {"$inc": {
-                "cards_studied": session.cards_studied,
-                "study_time": session.session_duration
-            }}
+            {
+                "$inc": {
+                    "cards_studied": session.cards_studied,
+                    "study_time": session.session_duration,
+                },
+                "$set": {"correct_rate": new_correct_rate},
+            },
         )
     else:
         # Create new progress entry
@@ -310,19 +323,14 @@ async def get_statistics():
     new_cards = await db.vocabulary_cards.count_documents({"repetitions": 0})
     
     # Get current streak
-    today = datetime.utcnow().date().isoformat()
+    today = datetime.utcnow().date()
     recent_progress = await db.daily_progress.find({}).sort("date", -1).limit(30).to_list(length=30)
-    
-    streak = 0
-    for progress in recent_progress:
-        if progress["cards_studied"] > 0:
-            streak += 1
-        else:
-            break
-    
+
+    streak = calculate_streak(recent_progress, today)
+
     return {
         "total_cards": total_cards,
-        "due_cards": due_cards, 
+        "due_cards": due_cards,
         "new_cards": new_cards,
         "current_streak": streak
     }
